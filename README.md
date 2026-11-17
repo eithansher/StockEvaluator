@@ -8,6 +8,9 @@ latest fiscal quarters of each company. Not investment advice.
 
 ## Run it
 
+Requires Python 3.12 or newer and an internet connection (filings come from SEC EDGAR on first run).
+No API key is needed.
+
 ```bash
 pip install -r requirements.txt
 python -m stt ingest --hold-back
