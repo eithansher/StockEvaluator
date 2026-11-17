@@ -1,0 +1,18 @@
+# Dark graphite ramp; ink-blue accent for links, focus and selection. Red/green/amber are verdicts only.
+[theme]
+base = "dark"
+backgroundColor = "#141415"
+secondaryBackgroundColor = "#19191b"
+textColor = "#ededed"
+primaryColor = "#8fb0ff"
+linkColor = "#8fb0ff"
+borderColor = "#2a2a2c"
+font = "'IBM Plex Sans', sans-serif"
+codeFont = "'IBM Plex Mono', monospace"
+baseFontSize = 15
+headingFontWeights = 500
+baseRadius = "8px"
+
+[theme.sidebar]
+backgroundColor = "#0f0f10"
+secondaryBackgroundColor = "#19191b"
