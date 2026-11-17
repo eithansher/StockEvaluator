@@ -2,19 +2,23 @@
 
 Reading order on every screen: outcome first (summary, verdict, the deciding figure), then the two period
 values with footnote links to their SEC filings, then the method folded under "How this was checked"."""
+import base64
 import re
+import urllib.parse
+import urllib.request
 from datetime import date, datetime
 from html import escape as e
 
 import streamlit as st
 
-from stt import ingest, model, pipeline
+from stt import DATA, ingest, model, pipeline
 from stt.definitions import COMPANIES, VERDICTS
 
 st.set_page_config(page_title="Stock Thesis Tracker", layout="wide")
 
 KIND = dict(zip(VERDICTS, "scl"))  # css class per verdict
-SHARED = ("Evidence cutoff", "Evidence through", "A newer filing")  # caveats that apply to every claim: shown once, in the summary
+SHARED = ("Evidence cutoff", "Evidence through", "A newer filing", "XBRL tags")  # caveats that apply to every claim: shown once, in the summary
+LOGO_URL = "https://assets.parqet.com/logos/symbol/{}?format=png"  # square icon with its own background
 EXAMPLES = ["Revenue is growing and margins are improving", "Debt is falling", "Operating margin is above 30%"]
 LEGEND = [("Supported", "The filings meet the claim's condition"),
           ("Contradicted", "The filings conflict with it"),
@@ -23,7 +27,7 @@ CSS = """<style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap');
 :root{--card:#19191b;--line:rgba(237,237,237,.08);--t1:#ededed;--t2:#a1a1a6;--t3:#85858b;--ok:#4cc38a;--bad:#e5484d;
   --unk:#d9a441;--accent:#8fb0ff;--mono:'IBM Plex Mono',ui-monospace,monospace}
-.stMainBlockContainer{max-width:1200px;padding-top:48px}
+.stMainBlockContainer{max-width:1200px;padding-top:64px}
 .stApp button[kind="primary"]{background:var(--t1);border-color:var(--t1);color:#141415}
 .stApp button[kind="primary"]:hover{background:#fff;border-color:#fff;color:#141415}
 .stt{color:var(--t1);font-size:15px;line-height:22px}
@@ -66,6 +70,10 @@ CSS = """<style>
 .tbl th:last-child,.tbl td:last-child{padding-right:0}
 .tbl td.num{font-size:13px}
 .brand{font-size:17px;font-weight:500;margin-bottom:4px}
+.who{display:flex;align-items:center;gap:16px;margin-bottom:8px}
+.who img,.who .initials{width:48px;height:48px;border-radius:12px;border:1px solid rgba(237,237,237,.16);flex:none}
+.who .initials{display:flex;align-items:center;justify-content:center;background:var(--card);font:500 14px/1 var(--mono)}
+.who .name{font-size:28px;line-height:32px;font-weight:500;margin-bottom:4px}
 .changed{color:var(--accent);font-size:12px;margin-left:8px}
 </style>"""
 
@@ -73,6 +81,41 @@ CSS = """<style>
 @st.cache_resource
 def get_db():
     return ingest.connect()
+
+
+@st.cache_data(ttl=600)
+def find_companies(query):
+    return ingest.search_companies(query)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def logo(ticker):
+    """Company icon as a data URI, kept in data/logos. None when it cannot be fetched: the title shows the ticker."""
+    # shortcut: icons come from Parqet's public logo service, by ticker; change LOGO_URL if it goes away.
+    path = DATA / "logos" / f"{ticker}.png"
+    if not path.exists():
+        try:
+            request = urllib.request.Request(LOGO_URL.format(urllib.parse.quote(ticker)),
+                                             headers={"User-Agent": "Mozilla/5.0 StockThesisTracker"})
+            raw = urllib.request.urlopen(request, timeout=5).read(300_000)
+        except OSError:
+            return None
+        if not raw.startswith(b"\x89PNG"):  # embed nothing but a real PNG
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
+
+
+def company_title(ticker, filings):
+    """Which company every tab below is about: icon, name, ticker and how recent the evidence is."""
+    name = re.sub(r"\s*/\w+/?$", "", COMPANIES[ticker]["name"])  # SEC names carry suffixes such as "/NEW"
+    name = name.title() if name.isupper() else name
+    icon = logo(ticker)
+    tile = f'<img src="{icon}" alt="">' if icon else f'<div class="initials">{e(ticker[:4])}</div>'
+    latest = f' · latest filing {e(filings[-1]["form"])}, filed {day(filings[-1]["filed"])}' if filings else ""
+    return (f'<div class="stt who">{tile}<div><div class="name">{e(name)}</div>'
+            f'<div class="meta">{e(ticker)}{latest}</div></div></div>')
 
 
 def day(iso):
@@ -184,12 +227,34 @@ def summary(records):
 
 
 db = get_db()
+ingest.load_companies(db)  # the connection is cached, but a code reload resets the in-memory company list
 st.html(CSS)
 with st.sidebar:
     st.html('<div class="stt brand">Stock Thesis Tracker</div>'
             '<div class="stt t2">Verdicts are computed from SEC filings in code, never by the model</div>')
-    ticker = st.selectbox("Company", list(COMPANIES), format_func=lambda t: f"{t} · {COMPANIES[t]['name']}")
+    if "added" in st.session_state:  # select the company that was just added
+        st.session_state["company"] = st.session_state.pop("added")
+    ticker = st.selectbox("Company", list(COMPANIES), key="company",
+                          format_func=lambda t: f"{t} · {COMPANIES[t]['name']}")
     cik = COMPANIES[ticker]["cik"]
+    with st.expander("Add another company"):
+        query = st.text_input("Company name or ticker", max_chars=60, placeholder="Costco or COST")
+        try:
+            matches = find_companies(query) if query.strip() else []
+        except OSError:
+            matches = st.error("SEC company search could not be reached") and []
+        if query.strip() and not matches:
+            st.caption("No listed company matches")
+        if matches:
+            pick = st.radio("Matches", matches[:5], format_func=lambda m: f"{m[0]} · {m[2]}", label_visibility="collapsed")
+            if st.button("Fetch filings and add", width="stretch"):
+                try:
+                    with st.spinner("Fetching the latest four fiscal periods from SEC EDGAR"):
+                        st.session_state["added"] = ingest.add_company(db, *pick)
+                except ValueError as err:
+                    st.error(str(err))
+                else:
+                    st.rerun()
     filings = db.execute("SELECT * FROM filings WHERE cik=? ORDER BY filed", (cik,)).fetchall()
     st.html(f'<div class="stt t2">Checks claims about revenue, GAAP operating margin and debt against the latest '
             f'four fiscal quarters. Not investment advice</div>'
@@ -199,6 +264,7 @@ with st.sidebar:
             f'Planner {e("Claude " + model.MODEL if model.use_claude() else "rule-based, no API key")}<br>'
             f'Snapshot {ingest.snapshot_id(db)}</div>')
 
+st.html(company_title(ticker, filings))
 if not filings:
     st.info(f"No filings are loaded for {ticker} yet")
     if st.button("Load filings from SEC EDGAR", type="primary",

@@ -6,13 +6,14 @@ import re
 import sqlite3
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from decimal import Decimal
 from html import unescape
 
 from . import DATA
-from .definitions import COMPANIES
+from .definitions import COMPANIES, TAGS, _ASC606, _CASH
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS filings(accession TEXT PRIMARY KEY, cik INT, form TEXT, filed TEXT, report_date TEXT,
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS facts(cik INT, accession TEXT, concept TEXT, unit TEX
 CREATE INDEX IF NOT EXISTS facts_lookup ON facts(cik, concept, pend);
 CREATE VIRTUAL TABLE IF NOT EXISTS passages USING fts5(text, cik UNINDEXED, accession UNINDEXED,
   section UNINDEXED, char_start UNINDEXED);
+CREATE TABLE IF NOT EXISTS companies(ticker TEXT PRIMARY KEY, cik INT, name TEXT, tags TEXT);
 CREATE TABLE IF NOT EXISTS claims(seq INTEGER PRIMARY KEY AUTOINCREMENT, claim_id TEXT, thesis_id TEXT, cik INT,
   thesis TEXT, evaluated_at TEXT, verdict TEXT, record TEXT);
 """
@@ -33,7 +35,15 @@ def connect(path=None):
     db = sqlite3.connect(path or DATA / "stt.sqlite", check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
+    load_companies(db)
     return db
+
+
+def load_companies(db):
+    """Register companies added beyond the audited five (kept in the database) in COMPANIES and TAGS."""
+    for r in db.execute("SELECT * FROM companies"):
+        COMPANIES.setdefault(r["ticker"], {"cik": r["cik"], "name": r["name"], "unaudited": True})
+        TAGS.setdefault(r["ticker"], json.loads(r["tags"]))
 
 
 def http_get(url):
@@ -67,6 +77,8 @@ def freeze_corpus(tickers):
             continue
         rows = _recent_filings(COMPANIES[t]["cik"])
         periods = {x["report_date"] for x in [x for x in rows if x["form"] in PERIODIC][:4]}
+        if not periods:
+            raise ValueError(f"{t} files no 10-Q or 10-K reports with the SEC; non-US filers are out of scope")
         manifest[t] = sorted((x for x in rows if x["report_date"] in periods), key=lambda x: x["filed"])
     DATA.mkdir(parents=True, exist_ok=True)
     MANIFEST.write_text(json.dumps(manifest, indent=1))
@@ -177,6 +189,53 @@ def ingest_corpus(db, tickers=None, hold_back=False):
         for e in entries:
             print(f"{t} {e['form']:6} period {e['report_date']} filed {e['filed']} {e['accession']}"
                   + ("" if ingest_filing(db, t, e) else " (already loaded)"))
+
+
+def search_companies(query):
+    """Listed companies matching a name or ticker, from EDGAR's own search: [(ticker, cik, name)]."""
+    # shortcut: this is the lookup behind EDGAR's search box, not a documented API; switch to SEC's
+    # company_tickers.json if it breaks (that file needs SEC_USER_AGENT to be set).
+    url = "https://efts.sec.gov/LATEST/search-index?keysTyped=" + urllib.parse.quote(query.strip()[:60])
+    return [(h["_source"]["tickers"].split(",")[0].strip().upper(), int(h["_id"]),
+             re.sub(r"\s*\([^)]*\)$", "", h["_source"]["entity"]))
+            for h in json.loads(http_get(url))["hits"]["hits"] if h["_source"].get("tickers")]
+
+
+def detect_tags(facts, accessions):
+    """Tag map for a company outside the audited five: per item, the candidate concept its corpus filings
+    report most often (ties go to the first, broader candidate). Unaudited, so every claim on such a company
+    carries a caveat; a missing required tag means abstain."""
+    count = Counter(c for c, v in facts.items() for f in v["units"].get("USD", []) if f["accn"] in accessions)
+    best = lambda *names: max(names, key=lambda n: count[n])
+    leases = lambda concept, role: role + (" (incl. finance leases)" if "CapitalLease" in concept else "")
+    current = best("LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent")
+    noncurrent = best("LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations")
+    return {"revenue": best("Revenues", _ASC606, "RevenueFromContractWithCustomerIncludingAssessedTax",
+                            "RevenuesNetOfInterestExpense", "SalesRevenueNet"),
+            "operating_income": "OperatingIncomeLoss", "cash": _CASH, "debt": [
+                (best("ShortTermBorrowings", "CommercialPaper"), "short-term borrowings", False),
+                (current, leases(current, "current portion of long-term debt"), False),
+                (noncurrent, leases(noncurrent, "noncurrent long-term debt"), True)]}
+
+
+def add_company(db, ticker, cik, name):
+    """Add any US filer: freeze its four latest fiscal periods, detect its tags, ingest. Returns the ticker."""
+    ticker = ticker.strip().upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", ticker):
+        raise ValueError("That does not look like a ticker symbol")
+    if ticker not in COMPANIES:
+        COMPANIES[ticker] = {"cik": int(cik), "name": name, "unaudited": True}
+        try:
+            entries = freeze_corpus([ticker])[ticker]
+            TAGS[ticker] = detect_tags(_company_facts(int(cik), entries[-1]["accession"]),
+                                       {x["accession"] for x in entries})
+        except (ValueError, OSError) as err:  # no 10-Q/10-K, or SEC unreachable: leave no half-added company
+            COMPANIES.pop(ticker, None)
+            raise ValueError(str(err)) from err
+        db.execute("INSERT OR REPLACE INTO companies VALUES(?,?,?,?)", (ticker, int(cik), name, json.dumps(TAGS[ticker])))
+        db.commit()
+    ingest_corpus(db, [ticker])
+    return ticker
 
 
 def pending(db, ticker):

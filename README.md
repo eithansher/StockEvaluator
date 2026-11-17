@@ -11,7 +11,7 @@ latest fiscal quarters of each company. Not investment advice.
 ```bash
 pip install -r requirements.txt
 python -m stt ingest --hold-back
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 `ingest --hold-back` freezes the corpus in `data/corpus.json` and loads everything except each company's
@@ -25,6 +25,13 @@ Copy `.env.example` to `.env` to enable two optional things:
   so without it verdicts work and management-commentary quotes are skipped.
 - `ANTHROPIC_API_KEY`. With it, Claude (`claude-sonnet-5-5`) splits the thesis into claim specifications and
   writes caveats. Without it, a rule-based planner handles the documented default phrasings.
+
+**Other companies.** The five companies above have a hand-audited XBRL tag map. Any other US-listed company
+can be added from the sidebar ("Add another company") or with `python -m stt add-company COST`: the app looks
+the company up in EDGAR, loads its four latest fiscal periods and detects its tags automatically. Those tags
+are not audited, so every verdict for an added company says so, and a claim is answered "Lacking sufficient
+evidence" when a required figure is not found under the expected tag (common for debt, and for banks'
+operating margin). Companies that file no 10-Q or 10-K (most foreign filers) cannot be added.
 
 Command line (the UI fallback):
 
@@ -71,4 +78,6 @@ Everything is one Python process and one SQLite file (`data/stt.sqlite`); raw SE
 - **`eval/gold_seed.jsonl` is a 13-claim seed**, hand-derived from raw SEC values to exercise the scorer. It is
   not the frozen 60-claim, two-annotator gold set; Cohen's kappa, Wilson intervals, the McNemar test and
   human citation judging are not implemented.
+- **More companies** (a stretch goal in the proposal) is implemented with unaudited, auto-detected tags;
+  the evaluation plan still covers only the five audited companies.
 - Automatic filing monitoring, segment and non-GAAP claims, and embedding retrieval remain stretch goals.

@@ -15,6 +15,7 @@ def print_changes(pairs):
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")  # reports use Δ, −, ÷
+    db = ingest.connect()  # first, so companies added earlier are valid choices below
     ap = argparse.ArgumentParser(prog="python -m stt", description="Stock Thesis Tracker")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("ingest", help="freeze the corpus (first run) and load filings from SEC EDGAR")
@@ -33,8 +34,9 @@ def main():
     p.add_argument("ticker", nargs="?", choices=COMPANIES)
     p = sub.add_parser("delete", help="delete a stored thesis and its claim records")
     p.add_argument("thesis_id")
+    p = sub.add_parser("add-company", help="add any US-listed company by ticker and load its latest filings")
+    p.add_argument("ticker")
     args = ap.parse_args()
-    db = ingest.connect()
 
     if args.cmd == "ingest":
         ingest.ingest_corpus(db, args.tickers, args.hold_back)
@@ -54,6 +56,15 @@ def main():
     elif args.cmd == "history":
         for r in pipeline.history(db, args.ticker):
             print(f"{r['run']['evaluated_at']}  {r['claim_id']}  {r['ticker']:5} {r['verdict']:28} {r['claim_text']}")
+    elif args.cmd == "add-company":
+        match = next((c for c in ingest.search_companies(args.ticker) if c[0] == args.ticker.upper()), None)
+        if match is None:
+            sys.exit(f"No listed company with ticker {args.ticker.upper()} was found in EDGAR")
+        try:
+            ingest.add_company(db, *match)
+        except ValueError as err:
+            sys.exit(str(err))
+        print(f"Added {match[2]} (CIK {match[1]}). Its XBRL tags were detected automatically and are not audited.")
     elif args.cmd == "delete":
         pipeline.delete_thesis(db, args.thesis_id)
 

@@ -10,7 +10,8 @@ from .calc import Gap
 from .definitions import ASSUMPTIONS, COMPANIES, FORMULAS, METRICS, TAGS, VERDICTS
 
 SUPPORTED, CONTRADICTED, LACKING = VERDICTS
-KINDS = {"quarter": (80, 100), "annual": (350, 380), "ytd9": (260, 290)}  # days; covers 52/53-week calendars
+# days; covers 52/53-week calendars and 12-week quarters (Costco: three quarters = 36 weeks = 252 days)
+KINDS = {"quarter": (80, 100), "annual": (350, 380), "ytd9": (250, 290)}
 UNIT_SUFFIX = {"pct": "%", "pp": " pp", "usd": ""}
 
 
@@ -288,6 +289,10 @@ def evaluate(db, ticker, spec):
     if not reported:
         rec["gaps"].append("No filings are ingested for this company.")
         return rec
+    if not cal:  # the calendar is built from revenue facts, so an empty one means the revenue tag is wrong
+        rec["gaps"].append(f"No revenue facts were found under the XBRL tag {TAGS[ticker]['revenue']}, "
+                           "so this company's fiscal periods cannot be read")
+        return rec
     currents = [reported[-1]] if fp == "latest" else reported if fp == "all" else [(spec["period"]["fy"], fp)]
     pairs = [(c, base_period(c, comparison) if comparison != "none" else None) for c in currents]
     rec["comparisons"] = [compare_one(db, ticker, cal, spec, c, b) for c, b in pairs]
@@ -312,6 +317,9 @@ def _finish(db, ticker, thesis, thesis_id, claim_id, spec, planner):
     if latest:
         caveats.append(f"Evidence through the {latest['form']} filed {latest['filed']} ({latest['accession']}); "
                        "later filings are not reflected")
+    if COMPANIES[ticker].get("unaudited"):
+        caveats.append("XBRL tags for this company were detected automatically and are not audited; "
+                       "check the cited figures against the filing")
     if ingest.pending(db, ticker):
         caveats.append("A newer filing is held back and not ingested yet, so this verdict may be stale")
     rec["explanation"] = " ".join(c["text"] for c in rec["comparisons"] if c["text"]) + (
